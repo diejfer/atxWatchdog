@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pio run:*)",
+      "Bash(platformio run:*)",
+      "Bash(python -m platformio run:*)",
+      "Bash(where:*)"
+    ]
+  }
+}
