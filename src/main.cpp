@@ -24,6 +24,10 @@ struct Config {
   int power_click_ms;
   int reset_click_ms;
   int watchdog_timeout_ms;
+  char watchdog_host[64];
+  int watchdog_port;
+  int watchdog_check_interval_ms;
+  bool watchdog_enabled;
 };
 
 // Variables globales
@@ -33,9 +37,10 @@ PubSubClient mqttClient(espClient);
 ESP8266WebServer server(80);
 
 unsigned long lastMqttKeepalive = 0;
-unsigned long lastSerialKeepalive = 0;
+unsigned long lastWatchdogCheck = 0;
+unsigned long lastWatchdogSuccess = 0;
 const unsigned long MQTT_KEEPALIVE_INTERVAL = 60000; // 60 segundos
-bool serialWatchdogEnabled = false;
+int consecutiveWatchdogFailures = 0;
 
 // Funciones adelantadas
 void loadConfig();
@@ -49,7 +54,8 @@ void clickButton(int pin, int duration_ms);
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 void reconnectMqtt();
 void publishKeepalive();
-void checkSerialWatchdog();
+void checkTcpWatchdog();
+bool testTcpConnection(const char* host, int port, int timeout_ms);
 
 void setup() {
   Serial.begin(115200);
@@ -128,8 +134,8 @@ void loop() {
     lastMqttKeepalive = now;
   }
 
-  // Verificar watchdog serial
-  checkSerialWatchdog();
+  // Verificar watchdog TCP
+  checkTcpWatchdog();
 }
 
 void loadConfig() {
@@ -143,6 +149,10 @@ void loadConfig() {
   config.power_click_ms = 200;
   config.reset_click_ms = 200;
   config.watchdog_timeout_ms = 120000; // 2 minutos
+  strcpy(config.watchdog_host, "");
+  config.watchdog_port = 22;
+  config.watchdog_check_interval_ms = 30000; // 30 segundos
+  config.watchdog_enabled = false;
 
   File file = LittleFS.open(CONFIG_FILE, "r");
   if (!file) {
@@ -169,6 +179,10 @@ void loadConfig() {
   config.power_click_ms = doc["power_click_ms"] | 200;
   config.reset_click_ms = doc["reset_click_ms"] | 200;
   config.watchdog_timeout_ms = doc["watchdog_timeout_ms"] | 120000;
+  strlcpy(config.watchdog_host, doc["watchdog_host"] | "", sizeof(config.watchdog_host));
+  config.watchdog_port = doc["watchdog_port"] | 22;
+  config.watchdog_check_interval_ms = doc["watchdog_check_interval_ms"] | 30000;
+  config.watchdog_enabled = doc["watchdog_enabled"] | false;
 
   Serial.println("Configuracion cargada desde archivo");
 }
@@ -185,6 +199,10 @@ void saveConfig() {
   doc["power_click_ms"] = config.power_click_ms;
   doc["reset_click_ms"] = config.reset_click_ms;
   doc["watchdog_timeout_ms"] = config.watchdog_timeout_ms;
+  doc["watchdog_host"] = config.watchdog_host;
+  doc["watchdog_port"] = config.watchdog_port;
+  doc["watchdog_check_interval_ms"] = config.watchdog_check_interval_ms;
+  doc["watchdog_enabled"] = config.watchdog_enabled;
 
   File file = LittleFS.open(CONFIG_FILE, "w");
   if (!file) {
@@ -221,17 +239,30 @@ void handleRoot() {
   html += "</style></head><body>";
   html += "<h1>ATX Watchdog</h1>";
 
-  html += "<div class='card'><h2>Configuracion MQTT</h2>";
+  html += "<div class='card'><h2>Configuracion General</h2>";
   html += "<form action='/save' method='POST'>";
   html += "<label>Hostname:</label><input name='hostname' value='" + String(config.hostname) + "'>";
+  html += "<label>Client ID:</label><input name='client_id' value='" + String(config.client_id) + "'>";
+  html += "</div>";
+
+  html += "<div class='card'><h2>Configuracion MQTT</h2>";
   html += "<label>MQTT Server:</label><input name='mqtt_server' value='" + String(config.mqtt_server) + "'>";
   html += "<label>MQTT Port:</label><input type='number' name='mqtt_port' value='" + String(config.mqtt_port) + "'>";
   html += "<label>MQTT User:</label><input name='mqtt_user' value='" + String(config.mqtt_user) + "'>";
   html += "<label>MQTT Password:</label><input type='password' name='mqtt_pass' value='" + String(config.mqtt_pass) + "'>";
-  html += "<label>Client ID:</label><input name='client_id' value='" + String(config.client_id) + "'>";
+  html += "</div>";
+
+  html += "<div class='card'><h2>Configuracion Botones</h2>";
   html += "<label>Power Click (ms):</label><input type='number' name='power_click_ms' value='" + String(config.power_click_ms) + "'>";
   html += "<label>Reset Click (ms):</label><input type='number' name='reset_click_ms' value='" + String(config.reset_click_ms) + "'>";
-  html += "<label>Watchdog Timeout (ms):</label><input type='number' name='watchdog_timeout_ms' value='" + String(config.watchdog_timeout_ms) + "'>";
+  html += "</div>";
+
+  html += "<div class='card'><h2>Watchdog TCP</h2>";
+  html += "<label>Habilitar Watchdog:</label><input type='checkbox' name='watchdog_enabled' value='1' " + String(config.watchdog_enabled ? "checked" : "") + " style='width:auto'>";
+  html += "<label>Host a monitorear:</label><input name='watchdog_host' value='" + String(config.watchdog_host) + "' placeholder='192.168.1.100'>";
+  html += "<label>Puerto:</label><input type='number' name='watchdog_port' value='" + String(config.watchdog_port) + "' placeholder='22'>";
+  html += "<label>Intervalo de chequeo (ms):</label><input type='number' name='watchdog_check_interval_ms' value='" + String(config.watchdog_check_interval_ms) + "'>";
+  html += "<label>Timeout sin respuesta (ms):</label><input type='number' name='watchdog_timeout_ms' value='" + String(config.watchdog_timeout_ms) + "'>";
   html += "<button type='submit'>Guardar Configuracion</button>";
   html += "</form></div>";
 
@@ -245,6 +276,17 @@ void handleRoot() {
   html += "<p><b>MQTT:</b> " + String(mqttClient.connected() ? "Conectado" : "Desconectado") + "</p>";
   html += "<p><b>Topic CMD:</b> /watchdog/" + String(config.client_id) + "/cmd</p>";
   html += "<p><b>Topic Status:</b> /watchdog/" + String(config.client_id) + "/status</p>";
+  if (config.watchdog_enabled) {
+    unsigned long timeSinceCheck = (millis() - lastWatchdogCheck) / 1000;
+    unsigned long timeSinceSuccess = (millis() - lastWatchdogSuccess) / 1000;
+    html += "<p><b>Watchdog:</b> Habilitado</p>";
+    html += "<p><b>Monitoreando:</b> " + String(config.watchdog_host) + ":" + String(config.watchdog_port) + "</p>";
+    html += "<p><b>Ultimo chequeo:</b> hace " + String(timeSinceCheck) + "s</p>";
+    html += "<p><b>Ultima respuesta OK:</b> hace " + String(timeSinceSuccess) + "s</p>";
+    html += "<p><b>Fallos consecutivos:</b> " + String(consecutiveWatchdogFailures) + "</p>";
+  } else {
+    html += "<p><b>Watchdog:</b> Deshabilitado</p>";
+  }
   html += "</div>";
 
   html += "</body></html>";
@@ -262,6 +304,12 @@ void handleSaveConfig() {
   if (server.hasArg("power_click_ms")) config.power_click_ms = server.arg("power_click_ms").toInt();
   if (server.hasArg("reset_click_ms")) config.reset_click_ms = server.arg("reset_click_ms").toInt();
   if (server.hasArg("watchdog_timeout_ms")) config.watchdog_timeout_ms = server.arg("watchdog_timeout_ms").toInt();
+
+  // Watchdog TCP
+  config.watchdog_enabled = server.hasArg("watchdog_enabled");
+  if (server.hasArg("watchdog_host")) strlcpy(config.watchdog_host, server.arg("watchdog_host").c_str(), sizeof(config.watchdog_host));
+  if (server.hasArg("watchdog_port")) config.watchdog_port = server.arg("watchdog_port").toInt();
+  if (server.hasArg("watchdog_check_interval_ms")) config.watchdog_check_interval_ms = server.arg("watchdog_check_interval_ms").toInt();
 
   saveConfig();
 
@@ -377,27 +425,66 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
-void checkSerialWatchdog() {
-  // Verificar si hay datos en el serial (keepalive del host)
-  if (Serial.available() > 0) {
-    String line = Serial.readStringUntil('\n');
-    line.trim();
+bool testTcpConnection(const char* host, int port, int timeout_ms) {
+  WiFiClient testClient;
+  testClient.setTimeout(timeout_ms);
 
-    if (line.startsWith("KEEPALIVE") || line.startsWith("PING")) {
-      lastSerialKeepalive = millis();
-      serialWatchdogEnabled = true;
-      Serial.println("ACK"); // Responder al host
-    }
+  Serial.printf("Probando conexion TCP a %s:%d... ", host, port);
+
+  bool connected = testClient.connect(host, port);
+
+  if (connected) {
+    Serial.println("OK");
+    testClient.stop();
+    return true;
+  } else {
+    Serial.println("FALLO");
+    return false;
   }
+}
 
-  // Verificar timeout del watchdog serial
-  if (serialWatchdogEnabled) {
-    unsigned long now = millis();
-    if (now - lastSerialKeepalive > config.watchdog_timeout_ms) {
-      Serial.println("WATCHDOG TIMEOUT! Ejecutando POWER CLICK");
-      clickButton(POWER_PIN, config.power_click_ms);
-      serialWatchdogEnabled = false; // Deshabilitar hasta recibir nuevo keepalive
-      lastSerialKeepalive = now;
+void checkTcpWatchdog() {
+  if (!config.watchdog_enabled) return;
+  if (strlen(config.watchdog_host) == 0) return;
+
+  unsigned long now = millis();
+
+  // Verificar si es momento de hacer un chequeo
+  if (now - lastWatchdogCheck >= config.watchdog_check_interval_ms) {
+    lastWatchdogCheck = now;
+
+    // Intentar conectar al host:puerto
+    bool success = testTcpConnection(config.watchdog_host, config.watchdog_port, 5000);
+
+    if (success) {
+      // Conexion exitosa
+      lastWatchdogSuccess = now;
+      consecutiveWatchdogFailures = 0;
+      Serial.println("Watchdog: Host respondiendo correctamente");
+    } else {
+      // Fallo en la conexion
+      consecutiveWatchdogFailures++;
+      Serial.printf("Watchdog: Fallo #%d conectando al host\n", consecutiveWatchdogFailures);
+
+      // Calcular tiempo sin respuesta
+      unsigned long timeSinceSuccess = now - lastWatchdogSuccess;
+
+      if (timeSinceSuccess >= config.watchdog_timeout_ms) {
+        Serial.println("========================================");
+        Serial.println("WATCHDOG TIMEOUT!");
+        Serial.printf("Host %s:%d sin responder por %lu ms\n",
+                      config.watchdog_host,
+                      config.watchdog_port,
+                      timeSinceSuccess);
+        Serial.println("Ejecutando POWER CLICK para reiniciar...");
+        Serial.println("========================================");
+
+        clickButton(POWER_PIN, config.power_click_ms);
+
+        // Resetear contadores
+        lastWatchdogSuccess = now;
+        consecutiveWatchdogFailures = 0;
+      }
     }
   }
 }

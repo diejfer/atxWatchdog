@@ -99,44 +99,36 @@ El ESP8266 publica cada 60 segundos:
 }
 ```
 
-### Watchdog Serial USB
+### Watchdog TCP
 
-Si conectas el NodeMCU via USB al equipo a monitorear:
+El ESP8266 puede monitorear automaticamente si un servidor esta respondiendo mediante conexiones TCP.
 
-**Desde el host (Linux/Windows):**
+**Configuracion desde la web:**
 
-Enviar por serial (115200 baud):
-```
-KEEPALIVE\n
-```
-o
-```
-PING\n
-```
-
-El ESP8266 respondera:
-```
-ACK
-```
+1. **Habilitar Watchdog:** Marcar checkbox
+2. **Host a monitorear:** IP o hostname del servidor (ej: `192.168.1.100`)
+3. **Puerto:** Puerto TCP a verificar (ej: `22` para SSH, `80` para HTTP, `3389` para RDP)
+4. **Intervalo de chequeo:** Cada cuanto tiempo verificar (default: 30000ms = 30 segundos)
+5. **Timeout sin respuesta:** Tiempo total sin respuesta antes de reiniciar (default: 120000ms = 2 minutos)
 
 **Comportamiento:**
-- El ESP8266 espera recibir KEEPALIVE periodicamente
-- Si pasa mas tiempo que `watchdog_timeout_ms` sin recibir keepalive
-- Ejecutara automaticamente un POWER CLICK para reiniciar el equipo
+- El ESP8266 intenta conectarse al host:puerto cada X segundos
+- Si la conexion TCP es exitosa, el host esta vivo
+- Si falla repetidamente por mas tiempo que el timeout configurado
+- Ejecuta automaticamente un POWER CLICK para reiniciar el equipo
 
-**Script ejemplo (Linux/Windows Python):**
-```python
-import serial
-import time
+**Ejemplos de puertos comunes:**
+- `22` - SSH (Linux/Unix)
+- `3389` - RDP (Windows Remote Desktop)
+- `80` o `443` - Servidor web
+- `5900` - VNC
+- Cualquier puerto TCP que tu servidor tenga abierto
 
-ser = serial.Serial('COM4', 115200)  # Ajustar puerto
-
-while True:
-    ser.write(b'KEEPALIVE\n')
-    response = ser.readline().decode().strip()
-    print(f"Respuesta: {response}")
-    time.sleep(30)  # Enviar cada 30 segundos
-```
+**Ventajas sobre watchdog serial:**
+- No requiere software adicional en el host
+- Funciona con cualquier servicio TCP
+- Monitoreo verdadero del estado del servidor (no solo del OS)
+- Funciona tanto con servidores Linux como Windows
 
 ## Conexion Hardware
 
