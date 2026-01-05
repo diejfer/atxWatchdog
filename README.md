@@ -7,17 +7,20 @@ Sistema de watchdog y control remoto para equipos ATX usando ESP8266 NodeMCU.
 - **WiFi**: Configuracion inicial mediante WiFiManager (portal captivo)
 - **WebServer**: Interfaz web para configuracion y control manual
 - **MQTT**: Control remoto y keepalive via MQTT
-- **Watchdog Serial**: Monitoreo via USB del equipo host
+- **Watchdog TCP**: Monitoreo via conexion TCP a un puerto del servidor
 - **GPIOs**: Control de botones Power y Reset
+- **Botones Fisicos**: Control local mediante botones en el watchdog
 
 ## Hardware
 
 - **NodeMCU ESP8266**
-- **Pines utilizados:**
-  - D1 (GPIO5) -> Boton POWER
-  - D2 (GPIO4) -> Boton RESET
-- **Alimentacion:** Vin (5V desde fuente ATX)
-- **USB (Opcional):** Para watchdog serial conectado al host
+- **Pines de Salida (conectar a motherboard):**
+  - D1 (GPIO5) -> Boton POWER de la motherboard
+  - D2 (GPIO4) -> Boton RESET de la motherboard
+- **Pines de Entrada (botones fisicos opcionales):**
+  - D5 (GPIO14) -> Boton POWER fisico del watchdog
+  - D6 (GPIO12) -> Boton RESET fisico del watchdog
+- **Alimentacion:** Vin (5V desde fuente ATX standby +5VSB)
 
 ## Configuracion Inicial
 
@@ -25,9 +28,15 @@ Sistema de watchdog y control remoto para equipos ATX usando ESP8266 NodeMCU.
 
 Al encender por primera vez, el ESP8266 creara un punto de acceso:
 - **SSID:** `ATX-Watchdog-Setup`
-- Conectarse desde el celular/PC
-- Se abrira portal captivo automaticamente
-- Configurar red WiFi de tu hogar
+- **Contraseña:** Ninguna (red abierta)
+
+**Pasos:**
+1. Conectarse al WiFi "ATX-Watchdog-Setup" desde celular/PC
+2. **IMPORTANTE:** Si no se abre automáticamente el portal captivo, abrir navegador y ir a:
+   - `http://192.168.4.1`
+3. Seleccionar tu red WiFi de la lista
+4. Ingresar contraseña
+5. Guardar - El ESP8266 se reiniciará y conectará a tu red
 
 ### 2. Configuracion Web
 
@@ -54,6 +63,7 @@ Desde la interfaz web puedes:
 - Ejecutar manualmente POWER CLICK
 - Ejecutar manualmente RESET CLICK
 - Modificar configuracion
+- **Resetear WiFi** (borra credenciales y reinicia en modo AP)
 
 ### Control via MQTT
 
@@ -151,6 +161,30 @@ El ESP8266 puede monitorear automaticamente si un servidor esta respondiendo med
 - **Opcion 1:** Alimentar Vin del NodeMCU desde +5VSB de la fuente ATX (siempre activo)
 - **Opcion 2:** Alimentar desde USB conectado al host (requiere que el USB este alimentado incluso con PC apagado)
 
+### Botones Fisicos (Opcional)
+
+Puedes agregar botones fisicos al watchdog para control local:
+
+```
+Boton POWER:
+  - Un terminal del boton -> D5 (GPIO14)
+  - Otro terminal del boton -> GND
+
+Boton RESET:
+  - Un terminal del boton -> D6 (GPIO12)
+  - Otro terminal del boton -> GND
+```
+
+**Caracteristicas:**
+- Los botones usan pull-up interno, no necesitan resistencias externas
+- Debounce automatico de 300ms
+- Al presionar ejecuta el mismo click configurado (duracion configurable desde web)
+- Util para pruebas o control local sin necesidad de web/MQTT
+
+**Tipo de botones recomendados:**
+- Pulsadores momentaneos (normalmente abiertos)
+- Cualquier interruptor de dos terminales
+
 ## Monitor Serial
 
 Conectar a 115200 baudios para ver mensajes de debug:
@@ -168,6 +202,31 @@ Servidor web iniciado en puerto 80
 =================================
 Sistema listo!
 =================================
+```
+
+## Resetear Configuracion WiFi
+
+Si necesitas reconfigurar el WiFi o ver el portal captivo nuevamente, tienes 3 opciones:
+
+### Opcion 1: Desde la Interfaz Web (Mas Facil)
+1. Acceder a la IP del ESP8266 desde el navegador
+2. Ir a la seccion "Zona Peligrosa" al final de la pagina
+3. Hacer clic en "RESETEAR WiFi"
+4. El ESP8266 se reiniciara en modo AP
+5. Conectarse a "ATX-Watchdog-Setup" y reconfigurar
+
+### Opcion 2: Borrar Flash Completo (PlatformIO)
+```bash
+# Borrar toda la flash del ESP8266
+pio run --target erase
+
+# Volver a subir el codigo
+pio run --target upload
+```
+
+### Opcion 3: Usar esptool (Si lo tienes instalado)
+```bash
+esptool.py --port COM4 erase_flash
 ```
 
 ## Compilar y Subir

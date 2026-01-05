@@ -6,9 +6,13 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 
-// Pines GPIO
-#define POWER_PIN D1  // GPIO5
-#define RESET_PIN D2  // GPIO4
+// Pines GPIO - Salidas (conectar a motherboard)
+#define POWER_PIN D1  // GPIO5 - Output para boton POWER
+#define RESET_PIN D2  // GPIO4 - Output para boton RESET
+
+// Pines GPIO - Entradas (botones fisicos en el watchdog)
+#define POWER_BUTTON_PIN D5  // GPIO14 - Input para boton POWER fisico
+#define RESET_BUTTON_PIN D6  // GPIO12 - Input para boton RESET fisico
 
 // Archivo de configuracion
 #define CONFIG_FILE "/config.json"
@@ -42,6 +46,11 @@ unsigned long lastWatchdogSuccess = 0;
 const unsigned long MQTT_KEEPALIVE_INTERVAL = 60000; // 60 segundos
 int consecutiveWatchdogFailures = 0;
 
+// Variables para botones fisicos
+unsigned long lastPowerButtonPress = 0;
+unsigned long lastResetButtonPress = 0;
+const unsigned long BUTTON_DEBOUNCE_MS = 300; // Debounce de 300ms
+
 // Funciones adelantadas
 void loadConfig();
 void saveConfig();
@@ -56,6 +65,7 @@ void reconnectMqtt();
 void publishKeepalive();
 void checkTcpWatchdog();
 bool testTcpConnection(const char* host, int port, int timeout_ms);
+void checkPhysicalButtons();
 
 void setup() {
   Serial.begin(115200);
@@ -65,13 +75,19 @@ void setup() {
   Serial.println("ATX Watchdog - Iniciando...");
   Serial.println("=================================");
 
-  // Configurar pines
+  // Configurar pines de salida
   pinMode(POWER_PIN, OUTPUT);
   pinMode(RESET_PIN, OUTPUT);
   digitalWrite(POWER_PIN, HIGH);
   digitalWrite(RESET_PIN, HIGH);
 
-  Serial.println("GPIOs configurados (D1=Power, D2=Reset)");
+  // Configurar pines de entrada con pull-up interno
+  pinMode(POWER_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+
+  Serial.println("GPIOs configurados:");
+  Serial.println("  Salidas: D1=Power, D2=Reset");
+  Serial.println("  Entradas: D5=Power Button, D6=Reset Button");
 
   // Inicializar LittleFS
   if (!LittleFS.begin()) {
@@ -86,6 +102,18 @@ void setup() {
   // WiFiManager - Configuracion inicial
   WiFiManager wifiManager;
   wifiManager.setConfigPortalTimeout(180); // 3 minutos timeout
+
+  // Mejorar deteccion de portal captivo
+  wifiManager.setAPCallback([](WiFiManager *myWiFiManager) {
+    Serial.println("\n========================================");
+    Serial.println("MODO PORTAL CAPTIVO ACTIVADO");
+    Serial.println("========================================");
+    Serial.println("SSID: ATX-Watchdog-Setup");
+    Serial.println("IP: 192.168.4.1");
+    Serial.println("\nConectate al WiFi y abre:");
+    Serial.println("  http://192.168.4.1");
+    Serial.println("========================================\n");
+  });
 
   Serial.println("Conectando a WiFi...");
   if (!wifiManager.autoConnect("ATX-Watchdog-Setup")) {
@@ -118,6 +146,9 @@ void setup() {
 }
 
 void loop() {
+  // Chequear botones fisicos
+  checkPhysicalButtons();
+
   // Manejar servidor web
   server.handleClient();
 
@@ -215,11 +246,14 @@ void saveConfig() {
   Serial.println("Configuracion guardada");
 }
 
+void handleResetWiFi();
+
 void setupWebServer() {
   server.on("/", handleRoot);
   server.on("/save", HTTP_POST, handleSaveConfig);
   server.on("/power", HTTP_POST, handleClickPower);
   server.on("/reset", HTTP_POST, handleClickReset);
+  server.on("/resetwifi", HTTP_POST, handleResetWiFi);
 }
 
 void handleRoot() {
@@ -269,6 +303,11 @@ void handleRoot() {
   html += "<div class='card'><h2>Control Manual</h2>";
   html += "<button class='warning' onclick='fetch(\"/power\",{method:\"POST\"}).then(()=>alert(\"Power click enviado\"))'>POWER CLICK</button>";
   html += "<button class='danger' onclick='fetch(\"/reset\",{method:\"POST\"}).then(()=>alert(\"Reset click enviado\"))'>RESET CLICK</button>";
+  html += "</div>";
+
+  html += "<div class='card' style='border:2px solid #f44336'><h2 style='color:#f44336'>Zona Peligrosa</h2>";
+  html += "<p><b>Resetear WiFi:</b> Borra las credenciales WiFi guardadas y reinicia el ESP8266 en modo AP para reconfigurar.</p>";
+  html += "<button class='danger' onclick='if(confirm(\"¿Estas seguro? Se perderan las credenciales WiFi\")){fetch(\"/resetwifi\",{method:\"POST\"}).then(()=>alert(\"WiFi reseteado. Reiniciando...\"))}'>RESETEAR WiFi</button>";
   html += "</div>";
 
   html += "<div class='card'><h2>Estado</h2>";
@@ -329,6 +368,25 @@ void handleClickReset() {
   Serial.println("Click RESET desde web");
   clickButton(RESET_PIN, config.reset_click_ms);
   server.send(200, "text/plain", "OK");
+}
+
+void handleResetWiFi() {
+  Serial.println("========================================");
+  Serial.println("RESETEO DE WiFi SOLICITADO");
+  Serial.println("Borrando credenciales WiFi...");
+  Serial.println("========================================");
+
+  server.send(200, "text/html", "<html><body><h1>WiFi Reseteado</h1><p>Reiniciando en modo AP...</p><p>Conectate a la red: <b>ATX-Watchdog-Setup</b></p></body></html>");
+
+  delay(1000);
+
+  // Borrar credenciales WiFi
+  WiFiManager wifiManager;
+  wifiManager.resetSettings();
+
+  Serial.println("Credenciales borradas. Reiniciando...");
+  delay(1000);
+  ESP.restart();
 }
 
 void clickButton(int pin, int duration_ms) {
@@ -486,5 +544,27 @@ void checkTcpWatchdog() {
         consecutiveWatchdogFailures = 0;
       }
     }
+  }
+}
+
+void checkPhysicalButtons() {
+  unsigned long now = millis();
+
+  // Leer estado de los botones (LOW = presionado porque usamos INPUT_PULLUP)
+  bool powerPressed = (digitalRead(POWER_BUTTON_PIN) == LOW);
+  bool resetPressed = (digitalRead(RESET_BUTTON_PIN) == LOW);
+
+  // Chequear boton POWER con debounce
+  if (powerPressed && (now - lastPowerButtonPress > BUTTON_DEBOUNCE_MS)) {
+    lastPowerButtonPress = now;
+    Serial.println("Boton POWER fisico presionado!");
+    clickButton(POWER_PIN, config.power_click_ms);
+  }
+
+  // Chequear boton RESET con debounce
+  if (resetPressed && (now - lastResetButtonPress > BUTTON_DEBOUNCE_MS)) {
+    lastResetButtonPress = now;
+    Serial.println("Boton RESET fisico presionado!");
+    clickButton(RESET_PIN, config.reset_click_ms);
   }
 }

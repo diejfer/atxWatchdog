@@ -11,8 +11,11 @@
 - ✅ Cliente MQTT con autenticacion opcional
 
 #### Control de Hardware
-- ✅ Control de GPIO D1 (GPIO5) para boton POWER
-- ✅ Control de GPIO D2 (GPIO4) para boton RESET
+- ✅ Control de GPIO D1 (GPIO5) para boton POWER (salida a motherboard)
+- ✅ Control de GPIO D2 (GPIO4) para boton RESET (salida a motherboard)
+- ✅ Botones fisicos en D5 (GPIO14) y D6 (GPIO12) para control local
+- ✅ Debounce automatico de 300ms para botones fisicos
+- ✅ Pull-up interno en pines de entrada (no requiere resistencias)
 - ✅ Duracion de click configurable para Power y Reset
 - ✅ Funcion de click con pulso LOW ajustable
 
